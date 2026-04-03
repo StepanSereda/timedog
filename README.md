@@ -1,76 +1,129 @@
 # timedog
 
-timedog is a Perl script that displays the set of files that were saved for any given backup created by Mac OS X Time Machine. By default it shows those files that were saved in the most recent backup. The listing includes the file sizes before and after, as well as a total file count and size. The script includes an option to summarize changes to a particular directory depth, producing a more concise display, helping to get an understanding of which areas of your system are taking up the most space in the backups. It can also sort by size, and/or omit files below a given size.
+### Why this exists
 
-## Usage
+The classic **timedog** script answers “what changed between two Time Machine snapshots” as **plain terminal output**. That works for a quick check, but it does not help much when the list is huge: you cannot comfortably **see the directory structure**, **move around** the tree, or **open a file** to see what actually changed inside.
 
-1. Open Terminal (in `/Applications/Utilities`)
-1. `/path/to/timedog -h`
-    * Displays the interactive help, using a pager, from which you can exit by pressing `q`
-1. `/path/to/timedog -d 5 -l`
-    * For instance, if you unzipped `timedog` to your Desktop, the path would be `~/Desktop/timedog`
-    * If you change to the directory containing `timedog`, then `./timedog` also works.
+**`timedog-server` exists to add that layer:** a **browser UI** where you **navigate** changed paths as a tree, drill into folders, and open files with **diff-style views** (text and hex) against the **old** and **new** snapshot on disk. **Interactive navigation plus file diffs** are the headline feature of the Go + React stack; the JSONL report format and HTTP API wrap the same comparison logic for scans, saved reports, and automation. The original Perl script remains the simple CLI option.
 
-The example above uses the options `-d 5 -l` which will summarize the changes up to five directory levels deep, and hide rows that pertain to symbolic links. These links are often meaningless and can safely be ignored.
+> **WARNING — 100% vibecoding**  
+> The Go server, web UI, and related tooling in this repository were produced with heavy AI assistance. The original Perl `timedog` script predates that work. Treat automation around backups as **experimental**: review permissions, paths, and code before relying on it with real Time Machine data.  
+>  
+> **Risk:** **You alone** bear **all** risks of using this software—wrong or incomplete diffs, misinterpreted paths, data loss, security issues, downtime, or decisions made from its output. It is provided **as-is** without warranty of any kind (see [LICENSE](LICENSE)). Nothing here is a substitute for your own judgment, backups, or verification. [Full disclaimer →](.github/DISCLAIMER.md)
 
-By default `timedog` shows the file changes in the most recent backup. It locates and changes to your Time Machine directory automatically (typically `/Volumes/Time\ Machine/Backups.backupdb/[Computer Name]`). Timestamped backup directories like `2013-05-01-163402` can be passed to `timedog` as an argument:
+**[Русская версия → README.ru.md](README.ru.md)**
 
-* `/path/to/timedog -d 5 -l 2013-05-01-163402`
+---
 
-You can get a list of these with the `-t` option:
+timedog is a Perl script that lists files that changed between Time Machine backups (sizes before/after, totals, optional depth summary, sorting, filters). **This repository also ships `timedog-server`**: a Go program with an embedded React UI that implements the **same comparison semantics** (inode / hard-link aware walks on two snapshot directories) and exports a **JSONL report** instead of terminal-only output.
 
-* `/path/to/timedog -t`
+## What we added or rewrote (vs. the classic Perl tool)
 
-Below is an example of the output.
+| Area | Notes |
+|------|--------|
+| **Comparison engine** | New implementation in Go (`internal/scan`): walks the *new* snapshot root, compares each path to the *old* root via `lstat` (inodes, sizes), prunes unchanged subtrees with `SkipDir` like the Perl tool. |
+| **Parallel walk** | Optional [`fastwalk`](https://github.com/charlievieth/fastwalk) traversal (`fast_walk` in API / UI); sequential `filepath.WalkDir` still available. |
+| **Report format** | JSONL: first line metadata (`timedog-report-meta`), one JSON object per changed path. Optional gzip (`.jsonl.gz`). |
+| **Streaming while scanning** | Background scan **creates the output file immediately**, writes **meta**, then **one line per changed path as it is found**, then **re-sorts / applies `-d` rollup** and **rewrites the file** with the final report (totals, skipped paths, sorted order). |
+| **HTTP API + UI** | `timedog-server`: list snapshots (`tmutil`), run scans with SSE progress, open reports as a tree, diff text/hex for files under sandboxed roots. Static UI is built with Vite/React and embedded in the binary. |
+| **Helpers** | `timecopy.py`, `timediff`, docs like `UsingTimecopy.md` — unchanged purpose; see those files for details. |
+
+The **Perl script** (`./timedog`) remains in the repo for terminal use and as a reference; behaviour of the server is intended to match its model, not line-for-line output formatting.
+
+---
+
+## Legacy Perl script (terminal)
+
+1. Open Terminal (`/Applications/Utilities`).
+2. `/path/to/timedog -h` — help in a pager (`q` to exit).
+3. Example: `/path/to/timedog -d 5 -l` — summarize up to 5 path segments deep, omit symlinks.
+
+Pass a backup stamp as an argument to compare specific snapshots; `-t` lists backups. Example output shape:
 
 ```shell
 $ ~/Desktop/timedog -d 5 -l
 ==> Comparing TM backup 2009-01-15-080533 to 2009-01-15-070632
     1.6KB->    2.9KB        /.Backup.log
-       0B->       0B        /.com.apple.TMCheckpoint
-     956B->     956B        /.exclusions.plist
-       0B->       0B        /Macintosh HD/.com.apple.timemachine.supported
-    1.1KB->    1.1KB        /Macintosh HD/private/var/db/.TimeMachine.Results.plist
-    1.1KB->    1.1KB    [1] /Macintosh HD/private/var/db/
-   12.0KB->   12.0KB        /Macintosh HD/Users/nfiedler/.DS_Store
-    6.5MB->    6.6MB   [26] /Macintosh HD/Users/nfiedler/Library/Application Support/
-       0B->     245B    [1] /Macintosh HD/Users/nfiedler/Library/Favorites/
-   40.3KB->   42.7KB   [29] /Macintosh HD/Users/nfiedler/Library/Preferences/
-    1.4MB->    1.4MB   [27] /Macintosh HD/Users/nfiedler/Library/Thunderbird/
+...
 ==> Total Backup: 111 changed files/directories, 8.08MB
 ```
 
-The number in square brackets (e.g. `[26]`) indicates the number of files and/or directories that changed within that particular directory tree. So in the example above, 26 entries under `Application Support` where changed.
+Numbers in brackets (e.g. `[26]`) count nested changes under a directory when using `-d`.
 
-## Time Machine over the Network
+### Time Machine over the network
 
-If you are using Time Machine over the network, such as with the Time Capsule product, you will probably need to mount the backup disk image before you can use the `timedog` script. To do this, open the Disk Utility application (from Spotlight, type "disk utility" and press Enter; or use Finder navigate to `/Applications/Utilities` and launch Disk Utility), then open Finder and navigate to the network share that contains your backup image. Select and drag the disk image to the Disk Utility window and drop it. You should then see the image name in left pane of the Disk Utility window. Now select that row and click the *Open* button in the toolbar. A small window will appear that shows the progress. When it shows "verifying", click the *Skip* button; another dialog appears to report a warning, just click *Ok*.
+Mount the backup sparsebundle/disk image (e.g. via Disk Utility) before pointing the tool at the backup.
 
-At this point you will have the Time Machine backup image mounted and available for browsing. You can now follow the example usage shown in the above section.
+### Copying Time Machine volumes
 
-## Copying Time Machine volumes
+See [timecopy.py](./timecopy.py) and [UsingTimecopy.md](./UsingTimecopy.md).
 
-If you have a need to copy a Time Machine volume without using a disk block copy utility, then [timecopy.py](./timecopy.py) might be for you. See the [UsingTimecopy](./UsingTimecopy.md) page for details on how this script can be used and why.
+### Permissions
 
-## Files Accessibility
+Unreadable paths may require `sudo`. On modern macOS, grant **Full Disk Access** to your terminal app (System Settings → Privacy & Security → Full Disk Access).
 
-If your time machine backup includes files which are not reachable or readable as a normal user, you should run `timedog` using `sudo`, like so:
+---
 
+## timedog-server (Go + web UI)
+
+The `timedog-server` binary serves a small HTTP API and the built React UI. It compares two Time Machine snapshot directories the same way as the Perl script (hard-link / inode semantics), writes a **JSONL report** (metadata line + one object per changed path), and **does not embed file contents** in the report. File bodies are read **only** when you open the Text/Hex panel and the snapshot roots still exist on disk.
+
+### Requirements
+
+- **macOS** (uses `tmutil listbackups -m` and local filesystem walks).
+- **[Go](https://go.dev/dl/)** to build the server; **[Node.js](https://nodejs.org/)** only if you rebuild the web UI for embedding.
+- Mount the **Time Machine** backup volume (or disk image) before **New scan** or before loading file content from paths that live on that volume.
+
+### macOS: Full Disk Access (important)
+
+Without **Full Disk Access**, macOS often blocks reads under backup trees, system folders, and other locations—you may see empty lists, skipped paths, or “Operation not permitted” during scans.
+
+1. Open **System Settings** (or **System Preferences** on older macOS) → **Privacy & Security** → **Full Disk Access**.
+2. Turn **on** access for the app that **runs** `timedog-server`:
+   - If you start the binary from **Terminal.app** or **iTerm**, add that terminal app and enable it.
+   - If you run the server from an IDE (Cursor, VS Code, etc.), add that app—or use a normal terminal after granting access there.
+3. **Quit and reopen** the terminal (or IDE) after changing the list so the permission is picked up.
+4. Optionally add `timedog-server` itself if you launch the binary from Finder or a wrapper; the process that performs filesystem access must be allowed.
+
+This is the same class of permission as for the Perl `timedog` script when reading protected paths.
+
+### Build
+
+From the repository root:
+
+```shell
+go build -o timedog-server ./cmd/timedog-server
 ```
-$ sudo /path/to/timedog -d 5 -l
+
+To embed the production UI into the binary, build the frontend and copy files into `cmd/timedog-server/web/dist`:
+
+```shell
+cd web && npm install && npm run build
+# then copy web/dist/* → cmd/timedog-server/web/dist (e.g. rsync or cp)
 ```
 
-## Troubleshooting
+Alternatively pass `-static /path/to/dist` when starting the server to load assets from a folder without copying into the repo.
 
-### Operation not permitted on Mojave
+### Run
 
-By default the Mojave release of macOS does not grant access to certain areas of the file system. To get around this restriction, simply grant the terminal application full disk access prior to using `timedog`. The steps are outlined below.
+```shell
+./timedog-server -addr 127.0.0.1:8080
+```
 
-1. Open the Apple menu and choose **System Preferences**
-1. Select the **Security & Privacy** control panel
-1. Select the **Privacy** tab
-1. In the left panel choose _Full Disk Access_
-1. Click the lock icon in the corner of the window to gain admin privileges
-1. Click the **+** button to add an application with full disk access
-1. Find and select the terminal application that you normally use (e.g. `Terminal.app` or `iTerm`)
-1. Start your terminal (again) and you should have full access
+Open in a browser: **http://127.0.0.1:8080** (or the host/port you passed to `-addr`).
+
+**Development (live-reload UI):** in one terminal run `./timedog-server`; in another, `cd web && npm run dev`. The Vite dev server proxies `/api` to the Go backend—set the dev server URL shown by Vite (often `http://localhost:5173`).
+
+### Behaviour notes
+
+- **Scan policy:** Starting a scan runs in a background job on the server; closing the browser does not stop the job unless you click **Cancel**. Completed jobs leave a session id for tree/content viewing.
+- **Report format:** `.jsonl` (optional `.jsonl.gz`). Upload/parser detects gzip by magic bytes.
+- **Safety:** Content endpoints resolve paths only under the `old_root` / `new_root` recorded for the session.
+
+## License and disclaimer
+
+[GNU General Public License v2.0](LICENSE) (full text; software is provided **without warranty**). Attribution and mixed components: [.github/COPYRIGHT.md](.github/COPYRIGHT.md) (`timecopy.py` is GPL-3.0). **Liability and AI-assisted code:** [.github/DISCLAIMER.md](.github/DISCLAIMER.md).
+
+## Community
+
+Contributing, issue templates, security contact, disclaimer: [.github/](.github/) (`CONTRIBUTING.md`, `SECURITY.md`, `DISCLAIMER.md`).
