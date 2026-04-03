@@ -1,0 +1,32 @@
+# Собранный бинарник (см. ./build.sh)
+/timedog-server
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Go
+*.test
+*.out
+*.prof
+coverage.out
+
+# Frontend (Vite / npm) — артефакты только в web/
+web/node_modules/
+web/dist/
+
+# Переменные окружения
+.env
+.env.*.local
+
+# ОС и редакторы
+.DS_Store
+.idea/
+*.swp
+*.swo
+*~
+
+# Логи и временные файлы
+*.log
+tmp/
+temp/
